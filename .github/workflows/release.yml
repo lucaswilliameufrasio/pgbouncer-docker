@@ -46,6 +46,9 @@ jobs:
     name: Build Debian amd64
     needs: [validate]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -75,6 +78,9 @@ jobs:
     name: Build Debian arm64
     needs: [validate]
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -104,6 +110,9 @@ jobs:
     name: Build Alpine amd64
     needs: [validate]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -133,6 +142,9 @@ jobs:
     name: Build Alpine arm64
     needs: [validate]
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -162,6 +174,9 @@ jobs:
     name: Manifest Debian
     needs: [validate, build-debian-amd64, build-debian-arm64]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     env:
       V: ${{ needs.validate.outputs.version }}
     steps:
@@ -187,6 +202,9 @@ jobs:
     name: Manifest Alpine
     needs: [validate, build-alpine-amd64, build-alpine-arm64]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     env:
       V: ${{ needs.validate.outputs.version }}
     steps:
