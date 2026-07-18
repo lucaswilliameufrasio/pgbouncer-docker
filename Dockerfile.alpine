@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1
+
+# ---------------------------------------------------------------------------
+# PgBouncer - variante Alpine/musl, footprint mínimo real (~10-15MB final).
+# Mesmo entrypoint da variante Debian (Dockerfile). Buildado do source
+# oficial, não do pacote `pgbouncer` da Alpine (que tem CVEs não resolvidas
+# no security tracker deles no momento em que isso foi escrito).
+#
+# Não testado com `docker build` neste ambiente (sandbox Ubuntu sem musl/apk
+# disponível) — mas segue exatamente a mesma receita de build usada pelo
+# próprio aport oficial do pgbouncer na Alpine (autoconf + libevent-dev +
+# openssl-dev + c-ares-dev), então o risco de quebra é baixo. Recomendo
+# rodar `docker build` localmente antes de ir pra produção.
+# ---------------------------------------------------------------------------
+
+ARG PGBOUNCER_VERSION=1.25.2
+ARG ALPINE_VERSION=3.20
+
+# =============================== build stage ===============================
+FROM alpine:${ALPINE_VERSION} AS builder
+
+ARG PGBOUNCER_VERSION
+
+RUN apk add --no-cache \
+        ca-certificates \
+        curl \
+        build-base \
+        autoconf \
+        automake \
+        libtool \
+        pkgconfig \
+        libevent-dev \
+        openssl-dev \
+        c-ares-dev \
+        linux-headers
+
+WORKDIR /build
+
+RUN set -e; \
+    VERSION_TAG="$(printf '%s' "${PGBOUNCER_VERSION}" | tr '.' '_')"; \
+    curl -fsSL -o pgbouncer.tar.gz \
+        "https://github.com/pgbouncer/pgbouncer/archive/refs/tags/pgbouncer_${VERSION_TAG}.tar.gz"; \
+    mkdir -p src; \
+    tar -xzf pgbouncer.tar.gz -C src --strip-components=1; \
+    rm pgbouncer.tar.gz
+
+WORKDIR /build/src
+
+RUN ./autogen.sh \
+    && ./configure --prefix=/usr/local --with-cares --disable-debug \
+    && make -j"$(nproc)" pgbouncer \
+    && strip pgbouncer
+
+# =============================== runtime stage ==============================
+FROM alpine:${ALPINE_VERSION} AS runtime
+
+LABEL org.opencontainers.image.title="pgbouncer" \
+      org.opencontainers.image.description="PgBouncer (Alpine/musl) buildado a partir do source, configurável via variáveis de ambiente" \
+      org.opencontainers.image.source="https://github.com/pgbouncer/pgbouncer"
+
+ARG PGBOUNCER_VERSION
+ENV PGBOUNCER_VERSION=${PGBOUNCER_VERSION}
+
+# libevent, openssl (libssl3+libcrypto3), c-ares: mesmos nomes desde sempre
+# na Alpine, sem transições tipo t64 do Debian. bash é usado pelo entrypoint
+# e pelo healthcheck (Alpine só tem ash por padrão).
+RUN apk add --no-cache \
+        bash \
+        ca-certificates \
+        libevent \
+        libssl3 \
+        c-ares \
+    && addgroup -S -g 1000 pgbouncer \
+    && adduser -S -D -H -u 1000 -G pgbouncer -h /etc/pgbouncer -s /sbin/nologin pgbouncer \
+    && mkdir -p /etc/pgbouncer /var/log/pgbouncer /var/run/pgbouncer \
+    && chown -R pgbouncer:pgbouncer /etc/pgbouncer /var/log/pgbouncer /var/run/pgbouncer
+
+COPY --from=builder /build/src/pgbouncer /usr/local/bin/pgbouncer
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/pgbouncer
+
+USER pgbouncer
+WORKDIR /etc/pgbouncer
+
+EXPOSE 6432
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PGBOUNCER_PORT:-6432}' || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]
