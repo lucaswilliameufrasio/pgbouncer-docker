@@ -8,17 +8,17 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Ensure generated files are only readable by the owner
+umask 077
+
 CONFIG_DIR="/etc/pgbouncer"
 INI_FILE="${CONFIG_DIR}/pgbouncer.ini"
 USERLIST_FILE="${CONFIG_DIR}/userlist.txt"
 
 log() { echo "[docker-entrypoint] $*" >&2; }
 
-# -----------------------------------------------------------------------
-# 0. Escape hatch total: se o usuário já montou um pgbouncer.ini pronto
-#    (volume/configmap) e setou PGBOUNCER_SKIP_CONFIG_GENERATION=true,
-#    não geramos nada e apenas executamos o comando recebido.
-# -----------------------------------------------------------------------
+# Escape hatch: se o usuário já montou um pgbouncer.ini pronto, pula
+# a geração automática.
 if [ "${PGBOUNCER_SKIP_CONFIG_GENERATION:-false}" = "true" ]; then
     log "PGBOUNCER_SKIP_CONFIG_GENERATION=true, usando configuração existente em ${CONFIG_DIR}"
     exec "$@"
@@ -114,7 +114,6 @@ chmod 0600 "$USERLIST_FILE"
 #    diretiva do pgbouncer.ini que não tenha uma variável dedicada.
 # -----------------------------------------------------------------------
 ADMIN_USERS="${PGBOUNCER_ADMIN_USERS:-${PGBOUNCER_ADMIN_USER:-pgbouncer}}"
-[ -n "$DB_USER" ] && ADMIN_USERS="${ADMIN_USERS},${DB_USER}"
 
 {
     echo "[databases]"
@@ -171,6 +170,7 @@ ADMIN_USERS="${PGBOUNCER_ADMIN_USERS:-${PGBOUNCER_ADMIN_USER:-pgbouncer}}"
     done < <(env)
 
 } > "$INI_FILE"
+chmod 0600 "$INI_FILE"
 
 log "pgbouncer.ini gerado em ${INI_FILE}"
 

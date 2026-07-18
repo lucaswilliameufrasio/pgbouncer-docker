@@ -1,21 +1,14 @@
 # syntax=docker/dockerfile:1
 
-# ---------------------------------------------------------------------------
-# PgBouncer - imagem otimizada, buildada a partir do source oficial
-# Substitui a imagem descontinuada da Bitnami e a imagem não mantida da
-# Railway, mantendo compatibilidade de configuração via variáveis de
-# ambiente (ver docker-entrypoint.sh e README.md).
-# ---------------------------------------------------------------------------
-
 ARG PGBOUNCER_VERSION=1.25.2
+ARG PGBOUNCER_SHA256=924ad35113fd0a71c8e2dbe85b5d03445532e2b7b37a9f8a48983beea238b332
 ARG DEBIAN_CODENAME=trixie
 
-# =============================== build stage ===============================
 FROM debian:${DEBIAN_CODENAME}-slim AS builder
 
 ARG PGBOUNCER_VERSION
+ARG PGBOUNCER_SHA256
 
-# Dependências de build. Nenhuma delas vai para a imagem final.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -32,43 +25,33 @@ RUN apt-get update \
 
 WORKDIR /build
 
-# Baixa o tarball da release diretamente do GitHub (fonte oficial do projeto,
-# já que a Bitnami descontinuou e não há mais releases empacotadas confiáveis
-# de terceiros). Usar o tag da release garante reprodutibilidade do build.
 RUN set -e; \
     VERSION_TAG="$(printf '%s' "${PGBOUNCER_VERSION}" | tr '.' '_')"; \
-    curl -fsSL -o pgbouncer.tar.gz \
-        "https://github.com/pgbouncer/pgbouncer/archive/refs/tags/pgbouncer_${VERSION_TAG}.tar.gz"; \
+    url="https://github.com/pgbouncer/pgbouncer/releases/download/pgbouncer_${VERSION_TAG}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz"; \
+    curl -fsSL -o pgbouncer.tar.gz "$url"; \
+    echo "${PGBOUNCER_SHA256}  pgbouncer.tar.gz" | sha256sum -c -; \
     mkdir -p src; \
     tar -xzf pgbouncer.tar.gz -C src --strip-components=1; \
     rm pgbouncer.tar.gz
 
 WORKDIR /build/src
 
-# --with-cares: usa c-ares para resolução assíncrona de DNS (recomendado
-#               pelo próprio projeto para uso em produção / containers).
-# make pgbouncer (em vez de `make` / `make all`): builda só o binário,
-#               sem os man pages, evitando a dependência de `pandoc` na
-#               imagem de build.
 RUN ./autogen.sh \
     && ./configure --prefix=/usr/local --with-cares --disable-debug \
     && make -j"$(nproc)" pgbouncer \
     && strip pgbouncer
 
-# =============================== runtime stage ==============================
 FROM debian:${DEBIAN_CODENAME}-slim AS runtime
-
-LABEL org.opencontainers.image.title="pgbouncer" \
-      org.opencontainers.image.description="PgBouncer buildado a partir do source, configurável via variáveis de ambiente" \
-      org.opencontainers.image.source="https://github.com/pgbouncer/pgbouncer"
 
 ARG PGBOUNCER_VERSION
 ENV PGBOUNCER_VERSION=${PGBOUNCER_VERSION}
 
-# Libs compartilhadas necessárias em runtime (libevent, OpenSSL, c-ares) +
-# bash (usado pelo entrypoint e pelo healthcheck).
-# No Trixie esses pacotes ganharam sufixo "t64" (transição pra time_t de
-# 64 bits); o fallback com "||" cobre build contra bookworm também.
+LABEL org.opencontainers.image.title="pgbouncer" \
+      org.opencontainers.image.description="PgBouncer buildado a partir do source, configurável via variáveis de ambiente" \
+      org.opencontainers.image.source="https://github.com/lucaswilliameufrasio/pgbouncer-docker" \
+      org.opencontainers.image.url="https://github.com/lucaswilliameufrasio/pgbouncer-docker" \
+      org.opencontainers.image.version="${PGBOUNCER_VERSION}"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates \
     && ( apt-get install -y --no-install-recommends libevent-2.1-7t64 \
@@ -92,8 +75,8 @@ WORKDIR /etc/pgbouncer
 
 EXPOSE 6432
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PGBOUNCER_PORT:-6432}' || exit 1
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PGBOUNCER_PORT:-6432}' 2>/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]

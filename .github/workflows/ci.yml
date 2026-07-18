@@ -1,0 +1,156 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate entrypoint syntax
+        run: bash -n docker-entrypoint.sh
+
+      - name: Validate VERSION format
+        run: |
+          V=$(cat VERSION)
+          if ! echo "$V" | grep -qP '^\d+\.\d+\.\d+$'; then
+            echo "error: VERSION must be semver (e.g. 1.25.2)"
+            exit 1
+          fi
+          echo "VERSION=$V"
+
+      - name: Verify version consistency across files
+        run: |
+          V=$(cat VERSION)
+          for f in Dockerfile Dockerfile.alpine; do
+            if ! grep -q "PGBOUNCER_VERSION=$V" "$f"; then
+              echo "error: $f does not contain PGBOUNCER_VERSION=$V"
+              exit 1
+            fi
+          done
+
+  build-and-test:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - { file: Dockerfile, tag: pgbouncer:ci-debian, name: Debian }
+          - { file: Dockerfile.alpine, tag: pgbouncer:ci-alpine, name: Alpine }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.variant.file }}
+          load: true
+          tags: ${{ matrix.variant.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify version
+        run: |
+          VERSION=$(cat VERSION)
+          OUTPUT=$(docker run --rm ${{ matrix.variant.tag }} pgbouncer --version 2>/dev/null)
+          echo "$OUTPUT"
+          if ! echo "$OUTPUT" | grep -q "PgBouncer $VERSION"; then
+            echo "error: version mismatch"
+            exit 1
+          fi
+
+      - name: Verify non-root user
+        run: |
+          UID_CHECK=$(docker run --rm ${{ matrix.variant.tag }} id -u 2>/dev/null)
+          if [ "$UID_CHECK" != "1000" ]; then
+            echo "error: expected UID 1000, got $UID_CHECK"
+            exit 1
+          fi
+
+      - name: Verify file permissions
+        run: |
+          docker run --rm -e POSTGRESQL_HOST=localhost ${{ matrix.variant.tag }} \
+            bash -c 'stat -c "%a %n" /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt' 2>/dev/null
+
+      - name: Integration test with PostgreSQL
+        run: |
+          NET="pgb-ci-${{ github.run_id }}-${{ strategy.job-index }}"
+          PG_CONTAINER="pg-ci-${{ strategy.job-index }}"
+          PB_CONTAINER="pb-ci-${{ strategy.job-index }}"
+
+          cleanup() {
+            docker rm -f "$PG_CONTAINER" "$PB_CONTAINER" 2>/dev/null || true
+            docker network rm "$NET" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          docker network create "$NET"
+
+          docker run -d --name "$PG_CONTAINER" --network "$NET" \
+            -e POSTGRES_USER=appuser -e POSTGRES_PASSWORD=apppass -e POSTGRES_DB=appdb \
+            postgres:16-alpine
+
+          until docker exec "$PG_CONTAINER" pg_isready -U appuser 2>/dev/null; do sleep 1; done
+
+          docker run -d --name "$PB_CONTAINER" --network "$NET" \
+            -e POSTGRESQL_HOST="$PG_CONTAINER" \
+            -e POSTGRESQL_DATABASE=appdb \
+            -e POSTGRESQL_USERNAME=appuser \
+            -e POSTGRESQL_PASSWORD=apppass \
+            -e PGBOUNCER_DATABASE=appdb \
+            -e PGBOUNCER_ADMIN_PASSWORD=adminpass \
+            ${{ matrix.variant.tag }}
+
+          sleep 4
+
+          docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:16-alpine \
+            psql -h "$PB_CONTAINER" -p 6432 -U appuser -d appdb -c "SELECT 1 AS test" | grep -q "1"
+
+          echo "CONNECTION OK"
+
+          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:16-alpine \
+            psql -h "$PB_CONTAINER" -p 6432 -U appuser -d pgbouncer -c "SHOW POOLS;" 2>&1 || true)
+          if echo "$OUT" | grep -qi "not allowed\|access denied\|not authorized"; then
+            echo "ADMIN DENIAL OK"
+          else
+            echo "ADMIN DENIAL FAIL: $OUT"
+            exit 1
+          fi
+
+          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=adminpass postgres:16-alpine \
+            psql -h "$PB_CONTAINER" -p 6432 -U pgbouncer -d pgbouncer -c "SHOW POOLS;" 2>&1)
+          if echo "$OUT" | grep -qi "ERROR:\|access denied"; then
+            echo "ADMIN ACCESS FAIL: $OUT"
+            exit 1
+          fi
+          echo "ADMIN ACCESS OK"

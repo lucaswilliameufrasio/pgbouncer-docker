@@ -5,35 +5,32 @@ Substitui:
 - imagem da Railway (parada, sem updates de segurança)
 
 Builda o PgBouncer **direto do source oficial** (`github.com/pgbouncer/pgbouncer`),
-na versão `1.25.2` por padrão (última no momento em que isso foi escrito —
-já inclui as correções das CVE-2026-6664 a 6667). A configuração é 100% via
+com verificação de checksum SHA-256 do artifact de release. A configuração é 100% via
 variáveis de ambiente, no mesmo espírito da imagem da Bitnami.
 
-Testado localmente: o build do binário (`./autogen.sh && ./configure
---with-cares && make pgbouncer`) e o script de entrypoint foram validados
-antes de fechar a imagem. O build multi-stage completo (`docker build`) não
-foi rodado aqui porque o sandbox não tem daemon Docker — mas os dois pontos
-de maior risco (compilação e geração de config) foram checados de verdade.
+## Repositório
+
+- **Versão atual:** `1.25.2` (definida em [`VERSION`](VERSION))
+- **Imagens publicadas em:** `ghcr.io/<owner>/pgbouncer` (privado, acessível via Actions)
 
 ## Arquivos
 
 ```
-Dockerfile              # multi-stage build (builder + runtime enxuto)
+VERSION                 # versão atual do PgBouncer (fonte única da verdade)
+Dockerfile              # multi-stage build Debian (glibc)
+Dockerfile.alpine       # multi-stage build Alpine (musl, ~10-15MB)
 docker-entrypoint.sh    # gera pgbouncer.ini e userlist.txt a partir do ENV
 ```
 
 ## Build
 
 ```bash
-docker build -t meu-registro/pgbouncer:1.25.2 .
-
-# Para atualizar a versão do PgBouncer no futuro, basta trocar o ARG:
-docker build --build-arg PGBOUNCER_VERSION=1.26.0 -t meu-registro/pgbouncer:1.26.0 .
+docker build -t ghcr.io/meu-usuario/pgbouncer:1.25.2 .
+docker build -f Dockerfile.alpine -t ghcr.io/meu-usuario/pgbouncer:1.25.2-alpine .
 ```
 
 A imagem final não tem toolchain de build, nem `curl`/`git` — só o binário
-do pgbouncer e as libs de runtime (`libevent`, `libssl3`, `libcares2`).
-Roda como usuário não-root (`pgbouncer`, uid 1000).
+do pgbouncer e as libs de runtime. Roda como usuário não-root (`pgbouncer`, uid 1000).
 
 ## Debian (Trixie) vs Alpine — qual usar
 
@@ -42,18 +39,14 @@ O `Dockerfile` (Debian Trixie-slim) é o default: mais robusto pra debugar
 
 Se o objetivo é o menor footprint possível — bandwidth de pull menor no VPS,
 menos superfície de ataque — use o `Dockerfile.alpine` (musl): a mesma
-receita de build, mas final na faixa de ~10-15MB. Trade-off: debugar dentro
-do container é mais limitado (ash em vez de bash completo, ferramentas
-básicas da busybox), e musl tem algumas diferenças sutis de comportamento
-de libc vs glibc (não afeta o pgbouncer em si, que já é empacotado
-oficialmente pra Alpine há anos).
+receita de build, mas final na faixa de ~10-15MB.
 
 ```bash
 # Debian (default)
-docker build -t meu-registro/pgbouncer:1.25.2 .
+docker build -t ghcr.io/meu-usuario/pgbouncer:1.25.2 .
 
 # Alpine
-docker build -f Dockerfile.alpine -t meu-registro/pgbouncer:1.25.2-alpine .
+docker build -f Dockerfile.alpine -t ghcr.io/meu-usuario/pgbouncer:1.25.2-alpine .
 ```
 
 > Nota sobre versões do Debian: o `ARG DEBIAN_CODENAME` aponta para `trixie`
@@ -62,6 +55,9 @@ docker build -f Dockerfile.alpine -t meu-registro/pgbouncer:1.25.2-alpine .
 > 64 bits (`libssl3` → `libssl3t64`, `libevent-2.1-7` → `libevent-2.1-7t64`,
 > `libc-ares2` → `libc-ares2t64`) — o Dockerfile já tenta o nome novo com
 > fallback pro antigo, então funciona buildando contra qualquer um dos dois.
+
+> Nota sobre Alpine: o default é Alpine 3.21. Versões EOL (como 3.20) não são
+> suportadas. O CI valida que a versão base é uma release suportada.
 
 ## Deploy na Railway
 
@@ -237,20 +233,65 @@ SHOW STATS;
 SHOW CLIENTS;
 ```
 
-## Atualizando a versão do PgBouncer
+## Workflows (GitHub Actions)
 
-O `Dockerfile` baixa o tarball direto de
-`github.com/pgbouncer/pgbouncer/archive/refs/tags/pgbouncer_<versão>.tar.gz`.
-Para atualizar, confira a versão mais recente em
-https://github.com/pgbouncer/pgbouncer/releases e rebuilde com
-`--build-arg PGBOUNCER_VERSION=<nova-versão>`. Não depende de nenhuma imagem
-de terceiros descontinuada — só do repositório oficial do projeto.
+### CI (`ci.yml`)
+
+Executa em todo `pull_request` e push na `main`:
+
+- Valida sintaxe do `docker-entrypoint.sh`
+- Verifica consistência da `VERSION` entre os arquivos
+- Builda as duas variantes (Debian e Alpine)
+- Testa a imagem em container contra um PostgreSQL real
+- Verifica:
+  - `pgbouncer --version` corresponde à `VERSION`
+  - UID/GID 1000
+  - Permissões dos arquivos de configuração (`0600`)
+  - Conexão SQL através do PgBouncer
+  - Bloqueio de acesso ao console admin para usuário comum
+
+### Release (`release.yml`)
+
+Publica as imagens no GHCR quando um **maintainer cria uma tag `vX.Y.Z`**
+que corresponde ao conteúdo do arquivo `VERSION`.
+
+- Requer aprovação de ambiente (`release`)
+- Build multi-arquitetura (`linux/amd64` + `linux/arm64`)
+- Publica em `ghcr.io/<owner>/pgbouncer`
+- Tags geradas:
+
+  | Variante | Tags |
+  |---|---|
+  | Debian | `X.Y.Z`, `X.Y`, `X`, `latest` |
+  | Alpine | `X.Y.Z-alpine`, `X.Y-alpine`, `X-alpine`, `alpine` |
+
+### Atualização automática de versão (`upstream-update.yml`)
+
+Executa semanalmente (segunda 06:23 UTC). Verifica o repositório oficial do
+PgBouncer e, se houver uma nova release estável:
+
+1. Atualiza `VERSION`, `Dockerfile`, `Dockerfile.alpine` e `README.md`
+2. Abre um Pull Request com as alterações
+
+Após revisar e mergear o PR, o maintainer cria a tag:
+
+```bash
+git tag v$(cat VERSION)
+git push origin v$(cat VERSION)
+```
+
+### Dependabot
+
+Mantém as Actions atualizadas automaticamente toda semana.
 
 ## Notas de segurança
 
 - A imagem final não tem `curl`, compilador ou ferramentas de build — só o
   binário e as libs de runtime, reduzindo superfície de ataque.
 - Roda como usuário não-root (`pgbouncer`, uid/gid 1000).
-- `userlist.txt` é gerado com `chmod 0600`.
-- Prefira sempre setar `PGBOUNCER_ADMIN_PASSWORD` — sem isso, o console admin
-  só é acessível pelo usuário do próprio banco de dados.
+- `userlist.txt` e `pgbouncer.ini` são gerados com `chmod 0600` e `umask 077`.
+- O usuário da aplicação **não** tem acesso ao console admin por padrão
+  (ao contrário de versões anteriores). Configure `PGBOUNCER_ADMIN_USERS`
+  explicitamente para conceder acesso administrativo.
+- Prefira sempre setar `PGBOUNCER_ADMIN_PASSWORD`.
+- O download do source é verificado por checksum SHA-256 do artifact oficial.
