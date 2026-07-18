@@ -142,7 +142,7 @@ psql -h localhost -p 6432 -U pgbouncer pgbouncer
 ```yaml
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: secret

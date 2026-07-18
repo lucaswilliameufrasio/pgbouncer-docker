@@ -124,7 +124,6 @@ jobs:
           done
 
       - name: Integration test with PostgreSQL
-        if: ${{ matrix.arch == 'amd64' }}
         run: |
           NET="pgb-ci-${{ github.run_id }}-${{ strategy.job-index }}"
           PG="pg-ci-${{ strategy.job-index }}"
@@ -140,7 +139,7 @@ jobs:
 
           docker run -d --name "$PG" --network "$NET" \
             -e POSTGRES_USER=appuser -e POSTGRES_PASSWORD=apppass -e POSTGRES_DB=appdb \
-            postgres:16-alpine
+            postgres:18-alpine
 
           until docker exec "$PG" pg_isready -U appuser 2>/dev/null; do sleep 1; done
 
@@ -155,11 +154,11 @@ jobs:
 
           sleep 4
 
-          docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:16-alpine \
+          docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:18-alpine \
             psql -h "$PB" -p 6432 -U appuser -d appdb -c "SELECT 1 AS test" | grep -q "1"
           echo "CONNECTION OK"
 
-          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:16-alpine \
+          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=apppass postgres:18-alpine \
             psql -h "$PB" -p 6432 -U appuser -d pgbouncer -c "SHOW POOLS;" 2>&1 || true)
           if echo "$OUT" | grep -qi "not allowed\|access denied\|not authorized"; then
             echo "ADMIN DENIAL OK"
@@ -168,7 +167,7 @@ jobs:
             exit 1
           fi
 
-          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=adminpass postgres:16-alpine \
+          OUT=$(docker run --rm --network "$NET" -e PGPASSWORD=adminpass postgres:18-alpine \
             psql -h "$PB" -p 6432 -U pgbouncer -d pgbouncer -c "SHOW POOLS;" 2>&1)
           if echo "$OUT" | grep -qi "ERROR:\|access denied"; then
             echo "ADMIN ACCESS FAIL: $OUT"
