@@ -8,12 +8,13 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
+env:
+  REGISTRY: ghcr.io
+
 jobs:
   validate:
-    name: Validate release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    name: Validate
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
@@ -22,16 +23,14 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Check version matches VERSION file
+      - name: Check tag matches VERSION
         id: check
         run: |
           TAG_VERSION="${{ github.ref_name }}"
           TAG_VERSION="${TAG_VERSION#v}"
           FILE_VERSION="$(cat VERSION)"
-          echo "Tag version: $TAG_VERSION"
-          echo "VERSION file: $FILE_VERSION"
           if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
-            echo "error: tag version v$TAG_VERSION does not match VERSION file ($FILE_VERSION)"
+            echo "error: tag v$TAG_VERSION != VERSION ($FILE_VERSION)"
             exit 1
           fi
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
@@ -39,73 +38,172 @@ jobs:
       - name: Confirm tag belongs to main
         run: |
           if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
-            echo "error: tag commit is not an ancestor of origin/main"
+            echo "error: tag commit not on main"
             exit 1
           fi
 
-  build-and-push:
-    name: ${{ matrix.variant.name }}
+  build-debian-amd64:
+    name: Build Debian amd64
     needs: [validate]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - { file: Dockerfile, suffix: '', platforms: linux/amd64,linux/arm64 }
-          - { file: Dockerfile.alpine, suffix: '-alpine', platforms: linux/amd64,linux/arm64 }
+    runs-on: ubuntu-24.04
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}${{ matrix.variant.suffix }}
-            type=semver,pattern={{major}}.{{minor}}${{ matrix.variant.suffix }}
-            type=semver,pattern={{major}}${{ matrix.variant.suffix }}
-            type=raw,value=${{ matrix.variant.suffix == '' && 'latest' || 'alpine' }}
-
-      - name: Build and push
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: ${{ matrix.variant.file }}
-          platforms: ${{ matrix.variant.platforms }}
+          file: Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-linux-amd64
+          build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - id: ref
+        run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
-      - name: Attest provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+  build-debian-arm64:
+    name: Build Debian arm64
+    needs: [validate]
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: push
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-linux-arm64
+          build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - id: ref
+        run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  build-alpine-amd64:
+    name: Build Alpine amd64
+    needs: [validate]
+    runs-on: ubuntu-24.04
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: push
+        with:
+          context: .
+          file: Dockerfile.alpine
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-alpine-linux-amd64
+          build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - id: ref
+        run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  build-alpine-arm64:
+    name: Build Alpine arm64
+    needs: [validate]
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: push
+        with:
+          context: .
+          file: Dockerfile.alpine
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-alpine-linux-arm64
+          build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - id: ref
+        run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  manifest-debian:
+    name: Manifest Debian
+    needs: [validate, build-debian-amd64, build-debian-arm64]
+    runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch manifest
+        run: |
+          MAJOR=$(echo "$V" | cut -d. -f1)
+          MINOR=$(echo "$V" | cut -d. -f1-2)
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$V \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$MINOR \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$MAJOR \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:latest \
+            ${{ needs.build-debian-amd64.outputs.ref }} \
+            ${{ needs.build-debian-arm64.outputs.ref }}
+
+  manifest-alpine:
+    name: Manifest Alpine
+    needs: [validate, build-alpine-amd64, build-alpine-arm64]
+    runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch manifest
+        run: |
+          MAJOR=$(echo "$V" | cut -d. -f1)
+          MINOR=$(echo "$V" | cut -d. -f1-2)
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$V-alpine \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$MINOR-alpine \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:$MAJOR-alpine \
+            -t ${{ env.REGISTRY }}/${{ github.repository }}:alpine \
+            ${{ needs.build-alpine-amd64.outputs.ref }} \
+            ${{ needs.build-alpine-arm64.outputs.ref }}

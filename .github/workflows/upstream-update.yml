@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     name: Check for new PgBouncer release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
@@ -27,14 +27,14 @@ jobs:
           JSON=$(gh release view --repo pgbouncer/pgbouncer --json tagName,isDraft,isPrerelease 2>/dev/null || \
                  curl -fsSL https://api.github.com/repos/pgbouncer/pgbouncer/releases/latest)
 
-          TAG=$(echo "$JSON" | jq -r '.tag_name // empty')
+          TAG=$(echo "$JSON" | jq -r '.tagName // .tag_name // empty')
           if [ -z "$TAG" ]; then
             echo "error: could not fetch upstream release"
             exit 1
           fi
 
-          IS_DRAFT=$(echo "$JSON" | jq -r '.draft // false')
-          IS_PRERELEASE=$(echo "$JSON" | jq -r '.prerelease // false')
+          IS_DRAFT=$(echo "$JSON" | jq -r '.isDraft // .draft // false')
+          IS_PRERELEASE=$(echo "$JSON" | jq -r '.isPrerelease // .prerelease // false')
 
           if [ "$IS_DRAFT" = "true" ] || [ "$IS_PRERELEASE" = "true" ]; then
             echo "Latest release is draft or prerelease, skipping"
@@ -47,8 +47,6 @@ jobs:
           fi
 
           VERSION=$(echo "$TAG" | tr '_' '.' | sed 's/^pgbouncer\.//')
-          echo "Upstream tag: $TAG"
-          echo "Version: $VERSION"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -57,10 +55,7 @@ jobs:
         run: |
           CURRENT=$(cat VERSION)
           NEW="${{ steps.upstream.outputs.version }}"
-          echo "Current: $CURRENT"
-          echo "New: $NEW"
           if [ "$CURRENT" = "$NEW" ]; then
-            echo "Versions match, no update needed"
             echo "updated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -76,51 +71,36 @@ jobs:
 
           SHA_URL="https://github.com/pgbouncer/pgbouncer/releases/download/${TAG}/pgbouncer-${V}.tar.gz"
           SHA256=$(curl -fsSL "$SHA_URL" | sha256sum | cut -d' ' -f1)
-          echo "SHA256: $SHA256"
 
           sed -i "s/^ARG PGBOUNCER_VERSION=.*/ARG PGBOUNCER_VERSION=${V}/" Dockerfile
           sed -i "s/^ARG PGBOUNCER_SHA256=.*/ARG PGBOUNCER_SHA256=${SHA256}/" Dockerfile
           sed -i "s/^ARG PGBOUNCER_VERSION=.*/ARG PGBOUNCER_VERSION=${V}/" Dockerfile.alpine
           sed -i "s/^ARG PGBOUNCER_SHA256=.*/ARG PGBOUNCER_SHA256=${SHA256}/" Dockerfile.alpine
 
-          sed -i "s/versão \`[0-9.]*\`/versão \`${V}\`/" README.md
-          sed -i "s/version [0-9.]*/version ${V}/" README.md
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add VERSION Dockerfile Dockerfile.alpine README.md
-          git commit -m "chore: bump PgBouncer to v${V}"
-
-          echo "SHA256=${SHA256}" >> "$GITHUB_ENV"
-
       - name: Create pull request
         if: steps.compare.outputs.updated == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: bump PgBouncer to v${{ steps.upstream.outputs.version }}'
           branch: automation/pgbouncer-update
           title: 'feat: update PgBouncer to v${{ steps.upstream.outputs.version }}'
-          commit-message: 'chore: bump PgBouncer to v${{ steps.upstream.outputs.version }}'
           body: |
             ## PgBouncer v${{ steps.upstream.outputs.version }}
 
-            Detected new upstream release: [${{ steps.upstream.outputs.tag }}](https://github.com/pgbouncer/pgbouncer/releases/tag/${{ steps.upstream.outputs.tag }})
+            Detected [${{ steps.upstream.outputs.tag }}](https://github.com/pgbouncer/pgbouncer/releases/tag/${{ steps.upstream.outputs.tag }}).
 
             ### Changes
             - Updated `VERSION` to `${{ steps.upstream.outputs.version }}`
             - Updated `Dockerfile` and `Dockerfile.alpine` version and checksum
-            - Updated `README.md` references
 
             ### After merging
-            A maintainer should create and push the release tag:
+            Create the release tag:
             ```bash
-            git tag v${{ steps.upstream.outputs.version }}
-            git push origin v${{ steps.upstream.outputs.version }}
+            git tag v$(cat VERSION)
+            git push origin v$(cat VERSION)
             ```
 
-            > **Note:** CI will not automatically run on this PR because it was created by `GITHUB_TOKEN`.
-            > Close and reopen this PR to trigger CI, or push a commit manually.
-          labels: |
-            automation
-            dependencies
+            > CI will not automatically run on this PR (created by GITHUB_TOKEN).
+            > Close and reopen to trigger it.
           delete-branch: true

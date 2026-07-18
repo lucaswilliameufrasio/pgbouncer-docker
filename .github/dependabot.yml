@@ -8,8 +8,6 @@ updates:
       time: '06:00'
     commit-message:
       prefix: 'ci'
-    labels:
-      - ci
     groups:
       actions:
         patterns:
