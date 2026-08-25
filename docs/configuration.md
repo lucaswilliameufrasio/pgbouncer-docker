@@ -32,7 +32,8 @@ These variables define which PostgreSQL backend PgBouncer connects to.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PGBOUNCER_DATABASE` | `*` | Database alias clients use to connect. `*` accepts any name. |
-| `PGBOUNCER_DATABASES` | — | Multiple databases: `alias1 = host=h1 port=5432 dbname=d1;alias2 = host=h2 dbname=d2` (semicolon-separated). Overrides `DATABASE_URL`/`POSTGRESQL_*`. |
+| `PGBOUNCER_DATABASE_MAP` | — | Aliases mapped to database names using the connection from `DATABASE_URL`/`POSTGRESQL_*`: `alias1=db1;alias2=db2`. Takes precedence over `PGBOUNCER_DATABASES`. |
+| `PGBOUNCER_DATABASES` | — | Multiple databases with complete connection strings: `alias1 = host=h1 port=5432 dbname=d1;alias2 = host=h2 dbname=d2` (semicolon-separated). Used when `PGBOUNCER_DATABASE_MAP` is not set. |
 
 ## Network
 
@@ -120,6 +121,17 @@ docker run -d --name pgbouncer \
 ```
 
 ### Multiple backends
+
+```bash
+docker run -d --name pgbouncer \
+  -e DATABASE_URL="postgres://app:secret@postgres:5432/postgres" \
+  -e PGBOUNCER_DATABASE_MAP="api=db_api;admin=db_admin;reports=db_reports" \
+  -e PGBOUNCER_ADMIN_PASSWORD="admin123" \
+  -p 6432:6432 \
+  ghcr.io/lucaswilliameufrasio/pgbouncer-docker:latest
+```
+
+For backends with different hosts or credentials, use the lower-level format:
 
 ```bash
 docker run -d --name pgbouncer \

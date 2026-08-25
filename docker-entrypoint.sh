@@ -67,11 +67,38 @@ fi
 
 # -----------------------------------------------------------------------
 # 2. Monta a seção [databases]
-#    PGBOUNCER_DATABASES, se definida, tem prioridade total (multi-tenant
-#    manual: "alias1=host=h1 port=5432 dbname=d1;alias2=host=h2 dbname=d2").
+#    PGBOUNCER_DATABASE_MAP, se definida, usa a conexão base e mapeia
+#    aliases para bancos ("alias1=db1;alias2=db2").
+#    PGBOUNCER_DATABASES continua disponível para conexões completas.
 # -----------------------------------------------------------------------
 DATABASES_SECTION=""
-if [ -n "${PGBOUNCER_DATABASES:-}" ]; then
+if [ -n "${PGBOUNCER_DATABASE_MAP:-}" ]; then
+    log "Usando PGBOUNCER_DATABASE_MAP para múltiplos bancos"
+    if [ -z "$DB_HOST" ]; then
+        log "ERRO: PGBOUNCER_DATABASE_MAP requer DATABASE_URL ou POSTGRESQL_HOST"
+        exit 1
+    fi
+
+    BASE_CONNSTR="host=${DB_HOST} port=${DB_PORT}"
+    [ -n "$DB_USER" ] && BASE_CONNSTR="${BASE_CONNSTR} user=${DB_USER}"
+    [ -n "$DB_PASSWORD" ] && BASE_CONNSTR="${BASE_CONNSTR} password=${DB_PASSWORD}"
+
+    IFS=';' read -ra MAPPINGS <<< "${PGBOUNCER_DATABASE_MAP}"
+    for mapping in "${MAPPINGS[@]}"; do
+        mapping="$(echo "$mapping" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -z "$mapping" ] && continue
+
+        alias="${mapping%%=*}"
+        dbname="${mapping#*=}"
+        alias="$(echo "$alias" | sed 's/[[:space:]]*$//')"
+        dbname="$(echo "$dbname" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -z "$alias" ] || [ -z "$dbname" ] || [ "$alias" = "$mapping" ]; then
+            log "ERRO: entrada inválida em PGBOUNCER_DATABASE_MAP: ${mapping}"
+            exit 1
+        fi
+        DATABASES_SECTION="${DATABASES_SECTION}${alias} = ${BASE_CONNSTR} dbname=${dbname}"$'\n'
+    done
+elif [ -n "${PGBOUNCER_DATABASES:-}" ]; then
     log "Usando PGBOUNCER_DATABASES para múltiplos bancos"
     IFS=';' read -ra ENTRIES <<< "${PGBOUNCER_DATABASES}"
     for entry in "${ENTRIES[@]}"; do

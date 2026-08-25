@@ -144,11 +144,8 @@ jobs:
           until docker exec "$PG" pg_isready -U appuser 2>/dev/null; do sleep 1; done
 
           docker run -d --name "$PB" --network "$NET" \
-            -e POSTGRESQL_HOST="$PG" \
-            -e POSTGRESQL_DATABASE=appdb \
-            -e POSTGRESQL_USERNAME=appuser \
-            -e POSTGRESQL_PASSWORD=apppass \
-            -e PGBOUNCER_DATABASE=appdb \
+            -e DATABASE_URL="postgres://appuser:apppass@$PG:5432/postgres" \
+            -e PGBOUNCER_DATABASE_MAP="appdb=appdb" \
             -e PGBOUNCER_ADMIN_PASSWORD=adminpass \
             ${{ matrix.tag }}
 
