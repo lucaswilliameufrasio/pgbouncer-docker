@@ -7,6 +7,12 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (defaults to VERSION)
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -26,7 +32,12 @@ jobs:
       - name: Check tag matches VERSION
         id: check
         run: |
-          TAG_VERSION="${{ github.ref_name }}"
+          TAG_VERSION="${{ inputs.version }}"
+          if [ -z "$TAG_VERSION" ] && [ "${{ github.event_name }}" = "push" ]; then
+            TAG_VERSION="${{ github.ref_name }}"
+          elif [ -z "$TAG_VERSION" ]; then
+            TAG_VERSION="$(cat VERSION)"
+          fi
           TAG_VERSION="${TAG_VERSION#v}"
           FILE_VERSION="$(cat VERSION)"
           if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
