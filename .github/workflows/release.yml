@@ -80,8 +80,10 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-linux-amd64
           build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=Debian-amd64
+          cache-to: type=gha,mode=max,scope=Debian-amd64
       - id: ref
         run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
@@ -112,8 +114,10 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-linux-arm64
           build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=Debian-arm64
+          cache-to: type=gha,mode=max,scope=Debian-arm64
       - id: ref
         run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
@@ -144,8 +148,10 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-alpine-linux-amd64
           build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=Alpine-amd64
+          cache-to: type=gha,mode=max,scope=Alpine-amd64
       - id: ref
         run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
@@ -176,8 +182,10 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.validate.outputs.version }}-alpine-linux-arm64
           build-args: PGBOUNCER_VERSION=${{ needs.validate.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=Alpine-arm64
+          cache-to: type=gha,mode=max,scope=Alpine-arm64
       - id: ref
         run: echo "ref=${{ env.REGISTRY }}/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
@@ -236,3 +244,80 @@ jobs:
             -t ${{ env.REGISTRY }}/${{ github.repository }}:alpine \
             ${{ needs.build-alpine-amd64.outputs.ref }} \
             ${{ needs.build-alpine-arm64.outputs.ref }}
+
+  sign-and-attest:
+    name: Sign and attest images
+    needs: [validate, manifest-debian, manifest-alpine]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      V: ${{ needs.validate.outputs.version }}
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Resolve manifest digests
+        id: digest
+        run: |
+          D=$(docker buildx imagetools inspect "$IMAGE:$V" --format '{{.Manifest.Digest}}')
+          echo "debian=$IMAGE@$D" >> "$GITHUB_OUTPUT"
+          D=$(docker buildx imagetools inspect "$IMAGE:$V-alpine" --format '{{.Manifest.Digest}}')
+          echo "alpine=$IMAGE@$D" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Debian SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.IMAGE }}:${{ env.V }}
+          format: spdx-json
+          output-file: sbom-debian.spdx.json
+          upload-artifact: false
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Alpine SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.IMAGE }}:${{ env.V }}-alpine
+          format: spdx-json
+          output-file: sbom-alpine.spdx.json
+          upload-artifact: false
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign images (keyless)
+        run: |
+          cosign sign --yes "${{ steps.digest.outputs.debian }}"
+          cosign sign --yes "${{ steps.digest.outputs.alpine }}"
+
+      - name: Attest SBOMs
+        run: |
+          cosign attest --yes --type spdxjson \
+            --predicate sbom-debian.spdx.json "${{ steps.digest.outputs.debian }}"
+          cosign attest --yes --type spdxjson \
+            --predicate sbom-alpine.spdx.json "${{ steps.digest.outputs.alpine }}"
+
+      - name: Self-verify signatures and attestations
+        env:
+          IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+        run: |
+          for REF in "${{ steps.digest.outputs.debian }}" "${{ steps.digest.outputs.alpine }}"; do
+            echo "verifying $REF"
+            cosign verify \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$REF"
+            cosign verify-attestation \
+              --type spdxjson \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$REF"
+          done
