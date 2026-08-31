@@ -49,6 +49,8 @@ PGBOUNCER_ADMIN_PASSWORD=<secret>
 - Source tarball verified by SHA-256 checksum
 - Runtime image has no build tools or package manager
 - Application user has **no** admin console access
+- Sigstore keyless signatures and SPDX SBOM attestations (`cosign verify`) — see [docs/releasing.md](docs/releasing.md#verifying-an-image)
+- SLSA provenance v1.0 attached to every pushed image
 
 ## Configuration
 

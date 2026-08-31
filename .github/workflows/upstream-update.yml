@@ -15,6 +15,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +80,7 @@ jobs:
 
       - name: Create pull request
         if: steps.compare.outputs.updated == 'true'
+        id: cpr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -101,6 +103,61 @@ jobs:
             git push origin v$(cat VERSION)
             ```
 
-            > CI will not automatically run on this PR (created by GITHUB_TOKEN).
-            > Close and reopen to trigger it.
+            > Full CI runs automatically on this PR (dispatched by this workflow).
+            > A status comment is posted when it finishes.
           delete-branch: true
+
+      - name: Trigger full CI on the update branch
+        if: steps.compare.outputs.updated == 'true'
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: automation/pgbouncer-update
+        run: |
+          SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run ci.yml --ref "$BRANCH"
+          RUN_ID=""
+          for i in $(seq 1 12); do
+            RUN_ID=$(gh run list --workflow=ci.yml --branch "$BRANCH" --created ">=$SINCE" \
+              --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$RUN_ID" ] && break
+            sleep 5
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "error: CI run not found after dispatch"
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for CI result
+        if: steps.compare.outputs.updated == 'true' && steps.dispatch.outputs.run_id != ''
+        id: ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID=${{ steps.dispatch.outputs.run_id }}
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/$RUN_ID"
+          if gh run watch "$RUN_ID" --exit-status --interval 15 >/dev/null; then
+            RESULT=success
+          else
+            RESULT=failure
+          fi
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "run_url=$RUN_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Report CI status on the PR
+        if: steps.compare.outputs.updated == 'true' && steps.ci.outputs.result != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ steps.cpr.outputs.pull-request-number }}
+          RUN_URL=${{ steps.ci.outputs.run_url }}
+          if [ "${{ steps.ci.outputs.result }}" = "success" ]; then
+            gh pr comment "$PR" --body "✅ Full CI passed on this update PR — [run]($RUN_URL)."
+          else
+            gh pr comment "$PR" --body "❌ Full CI failed on this update PR — [run]($RUN_URL). The upstream update needs attention before merge."
+          fi
+
+      - name: Fail on CI failure
+        if: steps.compare.outputs.updated == 'true' && steps.ci.outputs.result == 'failure'
+        run: exit 1
