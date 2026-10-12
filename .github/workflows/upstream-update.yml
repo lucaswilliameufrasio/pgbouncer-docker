@@ -99,8 +99,8 @@ jobs:
             ### After merging
             Create the release tag:
             ```bash
-            git tag v$(cat VERSION)
-            git push origin v$(cat VERSION)
+            git tag v${{ steps.upstream.outputs.version }}
+            git push origin v${{ steps.upstream.outputs.version }}
             ```
 
             > Full CI runs automatically on this PR (dispatched by this workflow).
